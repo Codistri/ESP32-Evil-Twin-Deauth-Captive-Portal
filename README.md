@@ -1,135 +1,179 @@
-# 🛰️ ESP32 Evil Twin + Deauth + Captive Portal (Own Build)
+# ESP32 Evil Twin + Deauthentication + Captive Portal (Rebuilt)
 
-Educational WiFi-security lab built on an **ESP32**: a deauthentication module
-that knocks clients off a target network, an **Evil Twin** access point that
-mimics that network, and a **captive portal** that lures victims into
-"verifying" their WiFi password. Every entered password is captured into a
-persistent log inside the ESP32 flash.
+An educational WiFi security lab built on ESP32 (Arduino core 3.x). Three
+modules work together:
 
-> ⚠️ **Disclaimer** — this project exists for **education and authorized
-> testing only**. Running it against networks you do not own or do not have
-> written permission to test is illegal almost everywhere (unauthorized
-> access / interference with communications equipment). Demo it on your own
-> hotspot or lab SSID.
+1. **Deauthentication** - raw 802.11 deauth/disassoc frames sent from the
+   ESP32's radio push clients off a target access point.
+2. **Evil Twin** - the ESP32 clones the target's SSID on the same channel;
+   kicked clients may reconnect to the clone instead of the real AP.
+3. **Captive Portal** - a lure page ("router firmware update failed, verify
+   your password") is served to anyone joining the clone. Passwords typed
+   into the form are logged and persisted in flash.
+
+For education and authorized testing only. Interfering with networks you do
+not own or have written permission to test is illegal in most jurisdictions.
+Demonstrate on your own hotspot or a dedicated lab SSID.
 
 ---
 
-## 🧠 How the attack works (3 stages)
+## 1. How it works
 
+### Stage 0 - control hotspot
+
+After boot the ESP32 exposes an access point:
+
+- SSID: `WiPhi_34732`
+- Password: `d347h320`
+- Management panel: `http://192.168.4.1/admin`
+- Captive portal (victim view): `/` (served for any path, DNS wildcard)
+
+Every 15 seconds the board scans the 2.4 GHz band and lists nearby networks
+(SSID, BSSID, channel) in the panel. Selecting one with `Select` locks it in
+as the attack target.
+
+### Stage 1 - deauthentication
+
+`Start deauthing` switches the radio to the target's channel and pushes
+26-byte handcrafted management frames through `esp_wifi_80211_tx()`
+(promiscuous mode is enabled before every burst, as raw TX requires it):
+
+- frame control `0xC0` (deauth) plus `0xA0` (disassociation),
+- receiver address = broadcast (`FF:FF:FF:FF:FF:FF`),
+- transmitter/BSSID = the target's real BSSID,
+- reason code 1.
+
+Send rate: one deauth + one disassoc burst (5 repetitions each) every
+100 ms. Clients receive an "AP kicked you" frame and drop the link, then
+keep retrying - while the evil twin stands by on the same channel.
+
+### Stage 2 - evil twin + captive portal
+
+`Start EvilTwin` reconfigures the built-in AP to broadcast the target SSID
+on the target channel. This matters: a clone on the wrong channel either
+would not be visible to clients, or would conflict with the deauth bursts.
+
+DNS answers are wildcarded by `DNSServer` (every domain resolves to
+`192.168.4.1`), so virtually any HTTP request from a connected device lands
+on the lure page. The page posts the entered password back to `/`; the ESP32
+then attempts `WiFi.begin()` with the victim network plus that password to
+verify it.
+
+### Stage 3 - credential capture
+
+Every submission is logged through `logAttempt()`:
+
+- displayed on `/admin` as `SSID -> password (age)`,
+- printed to the serial monitor as `[CAPTURED] ssid -> password`,
+- stored in NVS flash (`Preferences`, namespace `etwin`, one blob, cap
+  approx. 2500 bytes / about 35 entries; the oldest lines are evicted
+  first).
+
+Entries survive reboots. They are purged automatically after 24 hours of
+accumulated board uptime (the uptime counter is also stored in NVS, so no
+RTC or NTP is required). The `Delete log` button on `/admin` clears the log
+at once.
+
+While a password is being verified, the deauth loop is paused (`verifying`
+flag) - otherwise the ESP32 would deauthenticate its own checking connection.
+If the password is correct, the board actually joins the victim network,
+prints the success line on `/admin`, then restores the control hotspot.
+
+---
+
+## 2. Admin access during an attack
+
+Important workflow detail:
+
+- While the evil twin is running, the built-in AP carries the **victim's
+  SSID**, and `/` serves the lure page. Phones auto-open the lure page on
+  connect, which hides the panel.
+- The management panel is still reachable at **`http://192.168.4.1/admin`**
+  on the same network - open this address manually in a browser.
+- The network list is frozen while the evil twin is live (scanning is
+  suspended so it does not stall the captive portal).
+- `Stop EvilTwin` restores the `WiPhi_34732` control hotspot immediately,
+  without a reboot. A power cycle is the fallback if you lose track of the
+  panel (for example, if the phone bounced between networks).
+- Captured credentials are safe either way: they are held in NVS flash and
+  show up on `/admin` after any reboot.
+
+---
+
+## 3. Differences from the original code
+
+The starting point was
+[aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal](https://github.com/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal)
+(MIT). That code shipped with the packet-transmission calls commented out, so
+the attack could not actually fire, and the example README referenced an
+`html/` directory that did not exist in the repository (the portal is
+embedded as strings in the sketch). Key changes in this rebuild:
+
+- functional deauth via `esp_wifi_80211_tx()` bursts (the legacy
+  `wifi_send_pkt_freedom` approach does not work reliably on core 3.x);
+- evil twin AP now follows the target's channel instead of staying on 1;
+- all password attempts (including rejected ones) are logged - previously
+  only a successful verification was shown;
+- log persistence in NVS, 24-hour TTL based on accumulated uptime, manual
+  reset button on the panel;
+- deauth paused during password verification so correct passwords validate;
+- `WiFi.persistent(false)`: credentials captured during verification are no
+  longer retained by the SDK, which previously caused the board to
+  auto-connect to the victim network after a reboot and break the AP;
+- scanning does not block the portal while the evil twin is live, and a
+  first scan now runs at boot;
+- `index()` renamed (conflicted with the libc function of the same name).
+
+The whole program lives in a single sketch, `NetworkDeAuth.ino`: captive
+portal HTML/CSS is generated with string functions (`header()`, `footer()`,
+`indexPage()`, the `_tempHTML` table template) rather than served from a
+filesystem.
+
+---
+
+## 4. Building and flashing
+
+Toolchain: Arduino IDE with ESP32 core 3.x, or `arduino-cli`:
+
+```bash
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+arduino-cli compile --fqbn esp32:esp32:esp32 <sketch-folder>
+arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32
 ```
-   [0] SETUP                       [1] DEAUTH                      [2] EVIL TWIN
-┌──────────────┐            ┌────────────────────┐          ┌──────────────────────┐
-│ ESP32 boots  │            │ ESP32 sends deauth │  phone   │ ESP32 clones the SSID│
-│ AP WiPhi_*   │  ─select─▶ │ frames on victim's │ ─kicked─▶│ on the same channel  │
-│ admin page   │            │ channel, broadcast │  from AP │ + captive portal     │
-└──────────────┘            └────────────────────┘          └──────────┬───────────┘
-                                                    victim enters  │  trust
-                                                    "router failed │  buttons
-                                                     update" page  ▼
-                                                 ┌─────────────────────────────┐
-                                                 │  password logged → NVS flash│
-                                                 │  visible on /admin          │
-                                                 └─────────────────────────────┘
+
+On Linux the serial port typically needs one of:
+
+```bash
+sudo chmod 666 /dev/ttyUSB0        # one-shot, resets next replug
+sudo usermod -aG uucp $USER        # permanent (re-login required)
 ```
 
-### [0] Control hotspot — `WiPhi_34732`
-The ESP32 boots as an access point (`WiPhi_34732` / `d347h320`). Its web panel
-lives at **`http://192.168.4.1/admin`** (no auth — it's a lab device). Every
-15 seconds it scans the 2.4 GHz band and shows a table of nearby networks:
-SSID, BSSID, channel. You pick one with **Select**.
+The board can run from a phone power bank - no serial connection is needed
+during the demonstration.
 
-### [1] Deauthentication (802.11 management frames)
-With **Start deauthing**, the firmware hand-crafts raw 802.11 frames
-(26 bytes): frame control `0xC0` (deauth) + `0xA0` (disassoc), receiver =
-broadcast `FF:FF:FF:FF:FF:FF`, source/BSSID = the victim's AP. Bursts are
-pushed through the official ESP-IDF API **`esp_wifi_80211_tx()`** (raw frames
-require promiscuous mode enabled), with the radio pinned to the victim's
-channel. Legitimate clients see a "you got kicked by the AP" frame and drop
-the link; phones retry every few seconds — meanwhile the evil twin is standing
-by on the same channel (we spoof authentic MACs, no extra hardware).
+## 5. Demo procedure (own network only)
 
-### [2] Evil Twin + captive portal
-**Start EvilTwin** reconfigures the ESP32's AP: `_selectedNetwork.ssid` +
-**the same channel** as the target (crucial — otherwise victims scan past it
-and our own deauth frames never land). Any wifi client connecting to it
-receives a DNS wildcard answer (`DNSServer`, every domain → `192.168.4.1`) and
-a *scary-fake* portal: **"Firmware Update Failed — verify your password."**
-Password is POSTed to `/`, the ESP32 itself attempts `WiFi.begin()` with
-the victim's network + typed password to validate it.
-
-### [3] Credential capture
-Each attempt goes through `logAttempt()`:
-- shown instantly on `/admin` — `SSID → password (Nm ago)`;
-- printed to serial as `[CAPTURED] ssid -> password`;
-- **persisted to NVS flash** (`Preferences`, namespace `etwin`, blob ≤ 2500
-  bytes / ~35 entries, oldest evicted) — survives reboots;
-- entries are auto-purged after **24 h of board uptime** (the uptime counter
-  also lives in NVS, no RTC/NTP needed);
-- the **Delete log** button on `/admin` (`/clear`) wipes everything at once.
-
-If the typed password is *correct*, the ESP32 actually joins the victim's
-network, flashes "Successfully got password…" on `/admin`, and restores the
-control hotspot. While a password is being checked, deauth bursts are paused
-(`verifying` flag) so the ESP32 doesn't deauth **itself** out of the
-connection it's validating.
-
----
-
-## 🆚 What we changed vs. the original code
-
-| Original                              | This build                                                          |
-| ------------------------------------- | ------------------------------------------------------------------- |
-| deauth sending commented out (dead)   | works via `esp_wifi_80211_tx()` bursts, ~10 frames / 100 ms          |
-| evil twin forced to channel 1         | AP channel synced to the victim's channel                           |
-| "wrong" attempts not logged at all    | every attempt logged (screen, serial, flash)                        |
-| log lost on reboot                    | NVS persistence + 24 h TTL + manual reset button                    |
-| deauth ran during password verify     | paused while checking — correct passwords now validate reliably     |
-| STA creds auto-saved by the SDK       | `WiFi.persistent(false)` — reboot can't hijack the AP into STA mode |
-| periodic scan froze the portal        | scanning skipped while the evil twin is live; immediate scan on boot |
-
----
-
-## 🚀 Setup
-
-1. **Hardware**: any ESP32 devkit + micro-USB data cable (or plain 5 V power
-   bank — the board only needs power to run).
-2. **Toolchain**: Arduino IDE with the ESP32 core 3.x, or `arduino-cli`:
-
-   ```bash
-   arduino-cli core update-index
-   arduino-cli core install esp32:esp32
-   arduino-cli compile --fqbn esp32:esp32:esp32 <sketch folder>
-   arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32
-   ```
-
-   On Linux, port access usually needs one of:
-
-   ```bash
-   sudo chmod 666 /dev/ttyUSB0        # one-shot
-   sudo usermod -aG uucp $USER        # permanent, re-login
-   ```
-
-3. On first run the serial monitor (115200 baud) is your debug console.
-
-## 📡 Running the demo (own AP only!)
-
-1. Phone/PC → join `WiPhi_34732`, password `d347h320`.
-2. Browser → `http://192.168.4.1/admin`.
-3. Pick **Select** on the network you own (e.g. your phone's hotspot).
-4. **Start deauthing** — clients drop the real AP.
-5. **Start EvilTwin** — the fake clone appears on the same channel.
-6. Any client that "verifies the password" hands it over:
-   see it live on `/admin` (F5) or in the serial monitor.
-7. **Stop EvilTwin / Stop deauthing** reverts everything; **Delete log**
+1. Join `WiPhi_34732` (password `d347h320`) and open
+   `http://192.168.4.1/admin`.
+2. Select a network you own (for example, your phone's hotspot).
+3. `Start deauthing` - clients drop the real AP.
+4. `Start EvilTwin` - the clone appears on the same channel.
+5. Any device that "verifies its password" sends it to the board; refresh
+   `/admin` to see the list, or watch the serial monitor.
+6. `Stop EvilTwin` and `Stop deauthing` revert everything; `Delete log`
    clears the capture list.
 
----
+## 6. Known limitations
 
-## 👨‍💻 Credits & license
+- The panel and log have no authentication; this is a lab device, not a
+  production appliance.
+- The 24-hour TTL counts board uptime, not wall-clock time, since there is
+  no battery-backed RTC on the board.
+- WPA3-only targets and enterprise (802.1X) networks are out of scope.
+- Scan results are capped at 16 networks.
 
-The starting point was the public repo
-[IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal](https://github.com/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal)
-by `aadesh0706` (MIT). The deauth/evil-twin logic here is rebuilt on top of
-it (deauth transmission, channel sync, credential persistence, admin/log UX)
-— see the change table above. Released under MIT, kept the same spirit:
-**educational use only.**
+## 7. License
+
+MIT. The original project and this rebuild are strictly for educational and
+authorized testing purposes.
