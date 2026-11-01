@@ -1,142 +1,135 @@
-[![Github issues](https://img.shields.io/github/issues/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal)](https://github.com/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal/issues)
-[![Github forks](https://img.shields.io/github/forks/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal)](https://github.com/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal/network/members)
-[![Github stars](https://img.shields.io/github/stars/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal)](https://github.com/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal/stargazers)
-[![Top language](https://img.shields.io/github/languages/top/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal)](https://github.com/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal)
+# 🛰️ ESP32 Evil Twin + Deauth + Captive Portal (Own Build)
+
+Educational WiFi-security lab built on an **ESP32**: a deauthentication module
+that knocks clients off a target network, an **Evil Twin** access point that
+mimics that network, and a **captive portal** that lures victims into
+"verifying" their WiFi password. Every entered password is captured into a
+persistent log inside the ESP32 flash.
+
+> ⚠️ **Disclaimer** — this project exists for **education and authorized
+> testing only**. Running it against networks you do not own or do not have
+> written permission to test is illegal almost everywhere (unauthorized
+> access / interference with communications equipment). Demo it on your own
+> hotspot or lab SSID.
 
 ---
 
-## 🧠 Tags
+## 🧠 How the attack works (3 stages)
 
-`ESP32` `IoT` `WiFi Hacking` `Deauthentication` `Captive Portal` `Microcontroller Security` `Arduino`
-
----
-
----
-
-# 🚨 ESP32 Evil Twin WiFi Hacking | Deauthentication & Captive Portal 🚨
-
-> **Disclaimer:** This project is for **educational purposes only**. Use it responsibly and legally. Unauthorized attacks on networks are illegal in most countries. 🌐🔒
-
----
-
-![Profile Views](https://komarev.com/ghpvc/?username=aadesh0706&color=blue)  
-*Active since*: `September 2024`
-
-**Account From:** `September 2020`
-
----
-
-### 🎥 **Demo Video**
-
-Check out the demo of this project in action! 🎬  
-[![ESP32 Evil Twin WiFi Hacking](https://img.youtube.com/vi/AEb33trYEAY/0.jpg)](https://www.youtube.com/shorts/AEb33trYEAY)  
-Click the thumbnail or follow [this link](https://www.youtube.com/shorts/AEb33trYEAY) to watch.
-
----
-
-### 🎯 **Project Overview**
-
-This repository demonstrates how to execute an **Evil Twin WiFi Hacking** attack using an **ESP32** module. The attack forces users off their legitimate network by sending **deauthentication packets** and lures them into connecting to a fake access point where a **captive portal** captures their WiFi credentials. 
-
-The project leverages **HTML**, **CSS**, and **JavaScript** to build a custom front-end for the captive portal, making it look like a legitimate login page.
-
----
-
-## 🚀 **Features**
-- 🛑 **Deauthentication Attack**: Disconnects devices from their current WiFi network.
-- 🌐 **Captive Portal**: A fake login page where users unknowingly enter their WiFi credentials.
-- 🎨 **Custom Frontend**: Built using **HTML**, **CSS**, and **JavaScript** for user interaction.
-- 📡 **ESP32 Integration**: WiFi hacking on a powerful yet affordable ESP32 module.
-
----
-
-## 🛠️ **Setup and Installation**
-
-### 1️⃣ **Clone the Repository**
-```bash
-git clone https://github.com/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal.git
-cd IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal
+```
+   [0] SETUP                       [1] DEAUTH                      [2] EVIL TWIN
+┌──────────────┐            ┌────────────────────┐          ┌──────────────────────┐
+│ ESP32 boots  │            │ ESP32 sends deauth │  phone   │ ESP32 clones the SSID│
+│ AP WiPhi_*   │  ─select─▶ │ frames on victim's │ ─kicked─▶│ on the same channel  │
+│ admin page   │            │ channel, broadcast │  from AP │ + captive portal     │
+└──────────────┘            └────────────────────┘          └──────────┬───────────┘
+                                                    victim enters  │  trust
+                                                    "router failed │  buttons
+                                                     update" page  ▼
+                                                 ┌─────────────────────────────┐
+                                                 │  password logged → NVS flash│
+                                                 │  visible on /admin          │
+                                                 └─────────────────────────────┘
 ```
 
-### 2️⃣ **Install Required Libraries**
+### [0] Control hotspot — `WiPhi_34732`
+The ESP32 boots as an access point (`WiPhi_34732` / `d347h320`). Its web panel
+lives at **`http://192.168.4.1/admin`** (no auth — it's a lab device). Every
+15 seconds it scans the 2.4 GHz band and shows a table of nearby networks:
+SSID, BSSID, channel. You pick one with **Select**.
 
-Make sure you have the necessary libraries and tools installed to program the ESP32:
+### [1] Deauthentication (802.11 management frames)
+With **Start deauthing**, the firmware hand-crafts raw 802.11 frames
+(26 bytes): frame control `0xC0` (deauth) + `0xA0` (disassoc), receiver =
+broadcast `FF:FF:FF:FF:FF:FF`, source/BSSID = the victim's AP. Bursts are
+pushed through the official ESP-IDF API **`esp_wifi_80211_tx()`** (raw frames
+require promiscuous mode enabled), with the radio pinned to the victim's
+channel. Legitimate clients see a "you got kicked by the AP" frame and drop
+the link; phones retry every few seconds — meanwhile the evil twin is standing
+by on the same channel (we spoof authentic MACs, no extra hardware).
 
-- **ESP32 Core for Arduino**: [Install Guide](https://docs.espressif.com/projects/arduino-esp32/en/latest/installing.html)
+### [2] Evil Twin + captive portal
+**Start EvilTwin** reconfigures the ESP32's AP: `_selectedNetwork.ssid` +
+**the same channel** as the target (crucial — otherwise victims scan past it
+and our own deauth frames never land). Any wifi client connecting to it
+receives a DNS wildcard answer (`DNSServer`, every domain → `192.168.4.1`) and
+a *scary-fake* portal: **"Firmware Update Failed — verify your password."**
+Password is POSTed to `/`, the ESP32 itself attempts `WiFi.begin()` with
+the victim's network + typed password to validate it.
 
-### 3️⃣ **Upload the Code to ESP32**
-1. Open the `esp32_deauth_attack.ino` file in your Arduino IDE.
-2. Connect your ESP32 to your computer via USB.
-3. Select your ESP32 board from the Tools > Board menu.
-4. Click **Upload**.
+### [3] Credential capture
+Each attempt goes through `logAttempt()`:
+- shown instantly on `/admin` — `SSID → password (Nm ago)`;
+- printed to serial as `[CAPTURED] ssid -> password`;
+- **persisted to NVS flash** (`Preferences`, namespace `etwin`, blob ≤ 2500
+  bytes / ~35 entries, oldest evicted) — survives reboots;
+- entries are auto-purged after **24 h of board uptime** (the uptime counter
+  also lives in NVS, no RTC/NTP needed);
+- the **Delete log** button on `/admin` (`/clear`) wipes everything at once.
 
-### 4️⃣ **Customize the Captive Portal**
-- The captive portal files are located in the `html/` folder. 🎨
-- You can easily edit the design using **HTML**, **CSS**, and **JavaScript** to match your desired look and feel.
-
----
-
-## ⚡ **How to Run the Attack**
-
-1. **Launch the Deauthentication Attack**: 📶 Force devices off the legitimate WiFi network.
-2. **Start the Fake AP**: 🖧 Broadcast your rogue access point.
-3. **Use the Captive Portal**: 🌐 When users attempt to reconnect, they are directed to a fake login page.
-4. **Capture WiFi Credentials**: 🔐 Credentials entered by users are logged on the ESP32.
-
----
-
-## 📂 **Files Included**
-- `esp32_deauth_attack.ino`: The main code for the deauthentication attack.
-- `html/`: Contains all the files for the captive portal (HTML, CSS, JavaScript).
-- `README.md`: Overview, setup instructions, and usage information.
-
----
-
-## 🔗 **How It Works**
-
-1. **Deauthentication Attack**: The ESP32 sends deauth packets to disconnect devices from their original network.
-2. **Rogue Access Point**: After being disconnected, the ESP32 broadcasts a rogue AP with a similar name (SSID) to the legitimate one.
-3. **Captive Portal**: When users attempt to connect to the rogue AP, they are redirected to a fake login page asking for WiFi credentials.
-4. **Credentials Logged**: Any credentials entered are captured and stored on the ESP32.
-
----
-
-## 💻 **Technologies Used**
-- **ESP32**: Low-cost WiFi module.
-- **HTML**: Structure for the captive portal.
-- **CSS**: Styling for a user-friendly portal interface.
-- **JavaScript**: Handles user interactions and form submissions.
+If the typed password is *correct*, the ESP32 actually joins the victim's
+network, flashes "Successfully got password…" on `/admin`, and restores the
+control hotspot. While a password is being checked, deauth bursts are paused
+(`verifying` flag) so the ESP32 doesn't deauth **itself** out of the
+connection it's validating.
 
 ---
 
-## 🚧 **Future Improvements**
-- 🔒 Add encryption to securely transmit credentials.
-- 📊 Create a log file to store captured credentials.
-- 🔧 Improve the accuracy of deauthentication attacks.
+## 🆚 What we changed vs. the original code
+
+| Original                              | This build                                                          |
+| ------------------------------------- | ------------------------------------------------------------------- |
+| deauth sending commented out (dead)   | works via `esp_wifi_80211_tx()` bursts, ~10 frames / 100 ms          |
+| evil twin forced to channel 1         | AP channel synced to the victim's channel                           |
+| "wrong" attempts not logged at all    | every attempt logged (screen, serial, flash)                        |
+| log lost on reboot                    | NVS persistence + 24 h TTL + manual reset button                    |
+| deauth ran during password verify     | paused while checking — correct passwords now validate reliably     |
+| STA creds auto-saved by the SDK       | `WiFi.persistent(false)` — reboot can't hijack the AP into STA mode |
+| periodic scan froze the portal        | scanning skipped while the evil twin is live; immediate scan on boot |
 
 ---
 
-## 👨‍💻 **Contributing**
+## 🚀 Setup
 
-Want to improve this project? Feel free to fork the repository, make changes, and submit a pull request. Contributions are always welcome! 🛠️
+1. **Hardware**: any ESP32 devkit + micro-USB data cable (or plain 5 V power
+   bank — the board only needs power to run).
+2. **Toolchain**: Arduino IDE with the ESP32 core 3.x, or `arduino-cli`:
+
+   ```bash
+   arduino-cli core update-index
+   arduino-cli core install esp32:esp32
+   arduino-cli compile --fqbn esp32:esp32:esp32 <sketch folder>
+   arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32
+   ```
+
+   On Linux, port access usually needs one of:
+
+   ```bash
+   sudo chmod 666 /dev/ttyUSB0        # one-shot
+   sudo usermod -aG uucp $USER        # permanent, re-login
+   ```
+
+3. On first run the serial monitor (115200 baud) is your debug console.
+
+## 📡 Running the demo (own AP only!)
+
+1. Phone/PC → join `WiPhi_34732`, password `d347h320`.
+2. Browser → `http://192.168.4.1/admin`.
+3. Pick **Select** on the network you own (e.g. your phone's hotspot).
+4. **Start deauthing** — clients drop the real AP.
+5. **Start EvilTwin** — the fake clone appears on the same channel.
+6. Any client that "verifies the password" hands it over:
+   see it live on `/admin` (F5) or in the serial monitor.
+7. **Stop EvilTwin / Stop deauthing** reverts everything; **Delete log**
+   clears the capture list.
 
 ---
 
-## 📝 **License**
+## 👨‍💻 Credits & license
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details. 📜
-
----
-
-## ⚠️ **Disclaimer**
-
-This project is intended for **educational and ethical testing purposes** only. **Do not** use this code to target any WiFi network without explicit permission from the network owner. Always comply with local laws and regulations.
-
----
-
-### 📦 **Repository Tags**
-```
-ESP32, Evil Twin, WiFi Hacking, Deauthentication, Captive Portal, HTML, CSS, JavaScript, Cybersecurity, Ethical Hacking, ESP32 WiFi, IoT, WiFi Pentesting
-```
-
----
+The starting point was the public repo
+[IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal](https://github.com/aadesh0706/IOT-ESP32-Evil-Twin-WiFi-Hacking-Deauthentication-Captive-Portal)
+by `aadesh0706` (MIT). The deauth/evil-twin logic here is rebuilt on top of
+it (deauth transmission, channel sync, credential persistence, admin/log UX)
+— see the change table above. Released under MIT, kept the same spirit:
+**educational use only.**
