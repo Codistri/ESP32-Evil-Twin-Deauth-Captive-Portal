@@ -26,11 +26,15 @@ After boot the ESP32 exposes an access point:
 - SSID: `WiPhi_34732`
 - Password: `d347h320`
 - Management panel: `http://192.168.4.1/admin`
-- Captive portal (victim view): `/` (served for any path, DNS wildcard)
 
 Every 15 seconds the board scans the 2.4 GHz band and lists nearby networks
-(SSID, BSSID, channel) in the panel. Selecting one with `Select` locks it in
-as the attack target.
+(SSID, BSSID, channel) in the panel. Scanning pauses while deauthing, because
+a scan would switch channels. Selecting one with `Select` locks it in as the
+attack target. `Start deauthing` and `Start EvilTwin` are only accepted once a
+target is selected.
+
+The captive portal (lure page) is served on `/` and on any other path (DNS
+wildcard) only while the evil twin is running. Otherwise `/` shows the panel.
 
 ### Stage 1 - deauthentication
 
@@ -69,6 +73,10 @@ Every submission is logged through `logAttempt()`:
   approx. 2500 bytes / about 35 entries; the oldest lines are evicted
   first).
 
+Only well-formed WPA passphrases are logged: 8-63 printable ASCII
+characters. Anything else is rejected with a message and not recorded. All
+SSIDs and passwords are HTML-escaped before they are shown on the panel.
+
 Entries survive reboots. They are purged automatically after 24 hours of
 accumulated board uptime (the uptime counter is also stored in NVS, so no
 RTC or NTP is required). The `Delete log` button on `/admin` clears the log
@@ -76,8 +84,10 @@ at once.
 
 While a password is being verified, the deauth loop is paused (`verifying`
 flag) - otherwise the ESP32 would deauthenticate its own checking connection.
-If the password is correct, the board actually joins the victim network,
-prints the success line on `/admin`, then restores the control hotspot.
+The pause ends when the victim's browser reaches `/result`, or after 30 s if
+it never does. If the password is correct, the board joins the victim network,
+deauthing stops, the success line is shown on `/admin`, and the control
+hotspot is restored.
 
 ---
 
