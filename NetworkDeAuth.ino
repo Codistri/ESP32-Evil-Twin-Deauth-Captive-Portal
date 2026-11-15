@@ -20,6 +20,16 @@ IPAddress apIP(192, 168, 1, 1);
 DNSServer dnsServer;
 WebServer webServer(80);
 
+const char* ADMIN_TOKEN = "7f9a2c8e4b1d603f9a5e8c2b7d41096e"; // hardcode token for /admin and /clear
+
+bool checkToken() {
+  if (webServer.hasArg("token") && webServer.arg("token") == ADMIN_TOKEN) {
+    return true;
+  }
+  webServer.send(401, "text/plain", "");
+  return false;
+} 
+
 _Network _networks[16];
 _Network _selectedNetwork;
 
@@ -46,6 +56,8 @@ uint32_t totalUptimeSec = 0; // powered-on seconds, accumulated across reboots
 uint32_t bootMillis = 0;
 unsigned long upNow = 0;
 const uint32_t LOG_TTL_SEC = 24UL * 60 * 60; // entries live 24h of active uptime
+
+
 
 uint32_t effNowSec() {
   return totalUptimeSec + (millis() - bootMillis) / 1000;
@@ -198,6 +210,8 @@ void logAttempt(const String& ssid, const String& pass) {
 }
 
 void handleClear() {
+  if (!checkToken()) return;
+  
   _logRaw = "";
   _log = "";
   saveLog();
@@ -250,7 +264,7 @@ void setup() {
   webServer.on("/", handleIndex);
   webServer.on("/result", handleResult);
   webServer.on("/admin", handleAdmin);
-  webServer.on("/clear", handleClear);
+  webServer.on("/clear", handleClear); 
   webServer.onNotFound(handleIndex);
   webServer.begin();
   loadLog();
@@ -420,6 +434,8 @@ void handleIndex() {
 }
 
 void handleAdmin() {
+  if (!checkToken()) return;
+
   if (applyControlArgs()) {
     webServer.send(204);
     return;
