@@ -175,7 +175,8 @@ bool hasTarget() {
 }
 
 String logToHtml() {
-  String out = "";
+  String out;
+  out.reserve(_logRaw.length() * 4); // ~90B HTML overhead per ~30B log line
   uint32_t nowSec = effNowSec();
   int start = 0;
   while (true) {
@@ -190,8 +191,23 @@ String logToHtml() {
     String ssid = line.substring(t1 + 1, t2);
     String pass = line.substring(t2 + 1);
     uint32_t age = (nowSec > t) ? (nowSec - t) : 0;
-    String ageTxt = (age < 60) ? "just now" : (age < 3600) ? String(age / 60) + "m ago" : String(age / 3600) + "h ago";
-    out += "<li><code>" + htmlEscape(ssid) + "</code> &rarr; <code>" + htmlEscape(pass) + "</code> <small>(" + ageTxt + ")</small></li>";
+    out += "<li><code>";
+    out += htmlEscape(ssid);
+    out += "</code> &rarr; <code>";
+    out += htmlEscape(pass);
+    out += "</code> <small>(";
+    if (age < 60){
+      out += "just now";
+    }
+    else if (age < 3600){
+        out += (age / 60);
+        out += "m ago";
+    }
+    else {
+      out += (age / 3600);
+      out += "h ago";
+    }
+    out += ")</small></li>";
   }
   return out;
 }
