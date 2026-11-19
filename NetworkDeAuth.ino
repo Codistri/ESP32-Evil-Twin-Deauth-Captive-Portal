@@ -196,14 +196,12 @@ String logToHtml() {
     out += "</code> &rarr; <code>";
     out += htmlEscape(pass);
     out += "</code> <small>(";
-    if (age < 60){
+    if (age < 60) {
       out += "just now";
-    }
-    else if (age < 3600){
-        out += (age / 60);
-        out += "m ago";
-    }
-    else {
+    } else if (age < 3600) {
+      out += age / 60;
+      out += "m ago";
+    } else {
       out += (age / 3600);
       out += "h ago";
     }
