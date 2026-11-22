@@ -370,7 +370,7 @@ String controlPage() {
   html.reserve(_tempHTML.length() + _correct.length() + _log.length() + 4850); // ~50B tokens + ~4500B (16x ~280B rows) + ~300B footer tags
 
   // fill the template before any SSID is appended, so SSID text is never read as a placeholder
-  html.replace("{token}", ADMIN_TOKEN); 
+  html.replace("{token}", ADMIN_TOKEN);
   html.replace("{deauth_button}", deauthing_active ? "Stop deauthing" : "Start deauthing");
   html.replace("{deauth}", deauthing_active ? "stop" : "start");
   html.replace("{hotspot_button}", hotspot_active ? "Stop EvilTwin" : "Start EvilTwin");
@@ -378,9 +378,8 @@ String controlPage() {
   html.replace("{disabled}", hasTarget() ? "" : " disabled");
 
   String selectedBssid = bytesToStr(_selectedNetwork.bssid, 6);
-  
-  for (int i = 0; i < 16; ++i) {
 
+  for (int i = 0; i < 16; ++i) {
     if (_networks[i].ssid == "") {
       break;
     }
