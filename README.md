@@ -141,26 +141,83 @@ filesystem.
 
 ---
 
-## 4. Building and flashing
+## 4. Building and flashing the board
 
-Toolchain: Arduino IDE with ESP32 core 3.x, or `arduino-cli`:
+### 4.1 What you need
+
+- An **ESP32 dev board** (classic ESP32, e.g. ESP32-WROOM / DevKitC). The
+  sketch uses `esp_wifi_80211_tx()` from the ESP-IDF layer bundled with the
+  Arduino ESP32 core, so a plain ESP32 is required - ESP8266 and the
+  Wi-Fi-less ESP32 variants (ESP32-S2) are not supported.
+- A **data-capable USB cable** (many cheap cables are charge-only and will
+  not enumerate a serial port).
+- **Arduino ESP32 core 3.x**, installed either through the Arduino IDE board
+  manager or through `arduino-cli` (below).
+
+### 4.2 Sketch folder layout (do this first)
+
+The Arduino toolchain requires the main sketch to sit in a folder of the
+**same name** as the `.ino` file. This repository ships the sketch as
+`NetworkDeAuth.ino`, so before opening or compiling it, place it in a folder
+called `NetworkDeAuth/`:
 
 ```bash
+mkdir -p NetworkDeAuth
+cp NetworkDeAuth.ino NetworkDeAuth/
+```
+
+Open `NetworkDeAuth/NetworkDeAuth.ino` in the IDE, or point `arduino-cli` at
+the `NetworkDeAuth` folder.
+
+### 4.3 Flashing with arduino-cli (Linux)
+
+```bash
+# one-time: install the ESP32 core
 arduino-cli core update-index
 arduino-cli core install esp32:esp32
-arduino-cli compile --fqbn esp32:esp32:esp32 <sketch-folder>
-arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32
+
+# find the board's serial port (look for /dev/ttyUSB* or /dev/ttyACM*)
+arduino-cli board list
+
+# compile, then upload to the port you found
+arduino-cli compile --fqbn esp32:esp32:esp32 NetworkDeAuth
+arduino-cli upload  -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 NetworkDeAuth
 ```
 
-On Linux the serial port typically needs one of:
+On Linux the serial port usually needs permission first - pick one:
 
 ```bash
-sudo chmod 666 /dev/ttyUSB0        # one-shot, resets next replug
-sudo usermod -aG uucp $USER        # permanent (re-login required)
+sudo chmod 666 /dev/ttyUSB0        # one-shot, resets on next replug
+sudo usermod -aG uucp $USER        # permanent; log out and back in to apply
 ```
 
-The board can run from a phone power bank - no serial connection is needed
-during the demonstration.
+(On Debian/Ubuntu the serial group is `dialout` rather than `uucp`.)
+
+If the upload stalls at `Connecting....`, hold the board's **BOOT** button
+while it starts (release once flashing begins). Boards with an auto-reset
+circuit do not need this.
+
+### 4.4 Flashing with the Arduino IDE
+
+1. **File -> Preferences -> Additional boards manager URLs**, add
+   `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`.
+2. **Tools -> Board -> Boards Manager**, search `esp32`, install the
+   Espressif **esp32** package (3.x).
+3. Open `NetworkDeAuth/NetworkDeAuth.ino`.
+4. **Tools -> Board**, pick **ESP32 Dev Module**.
+5. **Tools -> Port**, select the port the board enumerated on.
+6. Click **Upload** (hold **BOOT** if it stalls at `Connecting....`).
+
+### 4.5 First boot / verifying it flashed
+
+Open the serial monitor at **115200 baud** (`arduino-cli monitor -p
+/dev/ttyUSB0 -c baudrate=115200`, or the IDE's Serial Monitor). On boot the
+board prints its status and starts the `WiPhi_34732` control hotspot; from a
+phone or laptop, join it (password `d347h320`) and open
+`http://192.168.4.1/admin` to confirm the panel loads.
+
+Once flashed, the board runs standalone - it can be powered from a phone
+power bank, with no serial connection needed during the demonstration.
 
 ## 5. Demo procedure (own network only)
 

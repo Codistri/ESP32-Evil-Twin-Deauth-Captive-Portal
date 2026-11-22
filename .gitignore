@@ -1,0 +1,11 @@
+# личные заметки (не публиковать)
+zhenya-brief.md
+
+# артефакты Arduino / IDE
+build/
+.output/
+.vscode/
+
+# система
+.DS_Store
+Thumbs.db
