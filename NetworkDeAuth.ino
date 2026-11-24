@@ -590,7 +590,7 @@ void loop() {
     deauth_now = millis();
   }
 
-  if (millis() - upNow >= 60000) { // every minute: persist uptime, purge >24h entries
+  if (millis() - upNow >= 900000) { // every 15 minutes: persist uptime, purge >24h entries
     upNow = millis();
     saveUptime();
     if (purgeOldEntries() > 0) {
